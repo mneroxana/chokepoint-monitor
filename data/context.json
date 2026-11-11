@@ -1,0 +1,36 @@
+{
+  "_readme": "Hand-curated analyst notes shown in the detail panel. Keep them short, dated and sourced; update as events move.",
+  "asOf": "2026-11-10",
+  "notes": {
+    "hormuz": [
+      {
+        "date": "Mar 2026",
+        "text": "Shipping through the strait came to a near-total halt after US and Israeli strikes on Iran in late February, per the Joint Maritime Information Center.",
+        "source": "Insurance Journal / JMIC",
+        "url": "https://amp.insurancejournal.com/news/international/2026/03/06/860782.htm"
+      },
+      {
+        "date": "Early Nov 2026",
+        "text": "Trackers still describe the strait as effectively closed; a brief June reopening did not last. Many vessels sail with AIS off, so PortWatch counts are a floor.",
+        "source": "DaveManuel.com chokepoint monitor (PortWatch-based)",
+        "url": "https://www.davemanuel.com/shipping-chokepoints.php"
+      }
+    ],
+    "babelmandeb": [
+      {
+        "date": "2023–2026",
+        "text": "Houthi attacks since late 2023 pushed much Asia–Europe traffic around the Cape; the Red Sea became more dangerous again in mid-2026.",
+        "source": "DaveManuel.com chokepoint monitor",
+        "url": "https://www.davemanuel.com/shipping-chokepoints.php"
+      }
+    ],
+    "suez": [
+      {
+        "date": "2026",
+        "text": "Some traffic returned to Suez in 2026 as Hormuz disruption reshuffled tanker routes, but Red Sea risk persists.",
+        "source": "DaveManuel.com chokepoint monitor",
+        "url": "https://www.davemanuel.com/shipping-chokepoints.php"
+      }
+    ]
+  }
+}

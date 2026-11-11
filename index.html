@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chokepoint Risk Monitor — maritime trade × commodity risk</title>
+  <meta name="description" content="Live IMF PortWatch chokepoint transits translated into commodity exposure, disruption alerts and scenario analysis for commodity traders and geopolitical risk analysts." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Ccircle cx=%228%22 cy=%228%22 r=%226%22 fill=%22%23d03b3b%22/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1>Chokepoint Risk Monitor</h1>
+      <p class="sub">IMF PortWatch vessel transits &nbsp;×&nbsp; commodity exposure &nbsp;×&nbsp; geopolitical risk</p>
+    </div>
+    <div class="controls">
+      <label class="ctl">Baseline
+        <select id="baseline">
+          <option value="yoy">Same week last year</option>
+          <option value="pre">Pre-Red Sea crisis (Jan–Oct 2023)</option>
+        </select>
+      </label>
+      <span id="source-pill" class="pill">Loading…</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="kpis" id="kpis" aria-label="Headline indicators"></section>
+
+    <section class="grid-2 wide-r">
+      <div class="card">
+        <div class="card-h"><h2>Global chokepoint status</h2><span class="hint">Marker size = structural commodity exposure · colour = status</span></div>
+        <div id="map" role="img" aria-label="Map of chokepoints coloured by disruption status"></div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Risk ranking</h2><span class="hint">7-day averages · click a row for detail</span></div>
+        <div class="table-wrap"><table id="ranking" class="ranking"></table></div>
+      </div>
+    </section>
+
+    <section class="card" id="detail" aria-live="polite"></section>
+
+    <section class="grid-2">
+      <div class="card" id="scenario">
+        <div class="card-h"><h2>Scenario: what if it closes?</h2><span class="hint">Stress-test a chokepoint</span></div>
+        <div class="scenario-controls">
+          <label class="ctl">Chokepoint <select id="sc-cp"></select></label>
+          <label class="ctl">Capacity lost <input id="sc-loss" type="range" min="10" max="100" step="5" value="50" /> <output id="sc-loss-out">50%</output></label>
+          <label class="ctl">Duration <input id="sc-days" type="range" min="7" max="180" step="1" value="30" /> <output id="sc-days-out">30 days</output></label>
+        </div>
+        <div id="sc-out" class="sc-out"></div>
+      </div>
+      <div class="card" id="brief">
+        <div class="card-h"><h2>Analyst brief</h2><span class="hint" id="brief-hint">Generated from the data</span></div>
+        <div id="ai-brief"></div>
+        <ul id="rule-brief" class="brief"></ul>
+      </div>
+    </section>
+
+    <section class="card method" id="method">
+      <h2>Methodology &amp; sources</h2>
+      <div class="cols">
+        <div>
+          <h3>Data</h3>
+          <p>Daily vessel transit counts and estimated cargo tonnage by ship type come from <a href="https://portwatch.imf.org/" target="_blank" rel="noopener">IMF PortWatch</a> (UN Global Platform AIS data, modelled by the IMF and University of Oxford), queried from its public ArcGIS API. PortWatch updates weekly with a lag of a few days, so “latest” means the latest settled day.</p>
+          <p>Oil and LNG flows per chokepoint: U.S. EIA, <a href="https://www.eia.gov/international/content/analysis/special_topics/World_Oil_Transit_Chokepoints" target="_blank" rel="noopener">World Oil Transit Chokepoints</a> (1H 2025). Hormuz LNG share and bypass context: <a href="https://www.iea.org/about/oil-security-and-emergency-response/strait-of-hormuz" target="_blank" rel="noopener">IEA</a>.</p>
+        </div>
+        <div>
+          <h3>Signals</h3>
+          <p><b>Change vs baseline</b> compares the latest 7-day average with either the same week a year earlier (seasonality-adjusted) or the Jan–Oct 2023 average (before Red Sea attacks began).</p>
+          <p><b>z-score</b> places the current 7-day average within the distribution of the prior year (excluding the last month), flagging moves that are statistically unusual for that route.</p>
+          <p><b>Status</b>: Normal &gt; −10%, Watch −10 to −25%, Disrupted −25 to −50%, Severe &lt; −50%, Surge &gt; +25% (typically rerouted traffic).</p>
+        </div>
+        <div>
+          <h3>Risk score</h3>
+          <p><b>Exposure (0–100)</b> = 75% energy weight (oil share of world seaborne oil ×0.7 + LNG share ×0.3, scaled so ≥25% = max) + 25% cargo weight (baseline tonnage relative to the largest tracked chokepoint).</p>
+          <p><b>Score</b> = Exposure × (0.35 + 0.65 × Disruption), where Disruption averages the drop in total and tanker transits. A big, quiet chokepoint scores moderate; a big, disrupted one scores high.</p>
+          <p class="caveat">Caveats: AIS undercounts “dark” transits during conflict, so collapses can be overstated; scenario outputs are first-order, ignore inventories and demand response, and are not trading advice.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    Data: IMF PortWatch (portwatch.imf.org) · EIA · IEA. Built as an open-source portfolio project. Not affiliated with the IMF.
+  </footer>
+
+  <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
