@@ -143,22 +143,22 @@ function initMap(land, borders) {
   });
   const fit = () => state.map.fitBounds([[-50, -150], [72, 165]], { padding: [6, 6] });
   fit();
-  window.addEventListener("resize", fit);
+  window.addEventListener("resize", () => { fit(); });
+  state.map.on("zoomend moveend", () => placeLabels());
   state.map.attributionControl.setPrefix(false).addAttribution("Map: Natural Earth");
   if (land) L.geoJSON(land, { interactive: false, style: { stroke: false, fillColor: "#fbfaf8", fillOpacity: 1 } }).addTo(state.map);
   if (borders) L.geoJSON(borders, { interactive: false, style: { color: "#dcd5cb", weight: 0.6, fill: false } }).addTo(state.map);
   state.markerLayer = L.layerGroup().addTo(state.map);
   $("#map-legend").innerHTML =
     STATUS.map((s) => `<span><i class="dot" style="background:${statusVar(s.id)}"></i>${s.label}</span>`).join("") +
-    `<span>Larger circle = more cargo normally</span>`;
+    `<span>Larger circle = more cargo normally</span><span>Black outline = selected</span>`;
 }
 
 function renderMap() {
   state.markerLayer.clearLayers();
   const css = getComputedStyle(document.documentElement);
-  const labelled = new Set([...state.metrics].sort((a, b) => b.size - a.size).slice(0, 9).map((m) => m.id));
-  state.metrics.filter((m) => m.gap > 0 && !m.lowTraffic).slice(0, 5).forEach((m) => labelled.add(m.id));
-  // draw small circles last so they stay clickable
+  state.mapMarkers = [];
+  // draw large circles first so small ones stay on top and clickable
   for (const m of [...state.metrics].sort((a, b) => b.size - a.size)) {
     if (m.cp.lat == null) continue;
     const radius = 5 + m.size * 15;
@@ -174,11 +174,47 @@ function renderMap() {
     );
     mk.on("click", () => select(m.id));
     mk.addTo(state.markerLayer);
-    if (labelled.has(m.id)) {
-      const dir = m.p?.labelDir || "right";
-      L.tooltip({ permanent: true, direction: dir, offset: [dir === "left" ? -(radius + 2) : radius + 2, 0], className: "map-label", interactive: false })
-        .setLatLng([m.cp.lat, m.cp.lon]).setContent(esc(m.name)).addTo(state.markerLayer);
-    }
+    state.mapMarkers.push({ m, radius });
+  }
+  placeLabels();
+}
+
+/** Name the most relevant chokepoints, skipping any label that would overlap a circle or another label. */
+function placeLabels() {
+  if (!state.labelLayer) state.labelLayer = L.layerGroup().addTo(state.map);
+  state.labelLayer.clearLayers();
+  if (window.innerWidth < 700 || !state.mapMarkers) return;
+  const size = state.map.getSize();
+  const circles = state.mapMarkers.map(({ m, radius }) => {
+    const p = state.map.latLngToContainerPoint([m.cp.lat, m.cp.lon]);
+    return { m, radius, p, box: [p.x - radius, p.y - radius, p.x + radius, p.y + radius] };
+  });
+  const overlaps = (a, b) => a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1];
+  const placed = [];
+  // priority: the selected chokepoint, then the biggest cargo shortfalls, then the busiest
+  const priority = (c) => (c.m.id === state.selected ? 1e12 : 0) + (c.m.tonsBase ?? 0) + 2 * Math.max(0, c.m.gap ?? 0);
+  const order = [...circles].sort((a, b) => priority(b) - priority(a));
+  for (const c of order) {
+    if (placed.length >= 16) break;
+    const w = c.m.name.length * 6.3 + 4, h = 15, r = c.radius, { x, y } = c.p;
+    const options = [
+      ["right", [x + r + 3, y - h / 2, x + r + 3 + w, y + h / 2], [r + 2, 0]],
+      ["left", [x - r - 3 - w, y - h / 2, x - r - 3, y + h / 2], [-(r + 2), 0]],
+      ["top", [x - w / 2, y - r - 3 - h, x + w / 2, y - r - 3], [0, -(r + 1)]],
+      ["bottom", [x - w / 2, y + r + 3, x + w / 2, y + r + 3 + h], [0, r + 1]],
+      ["right", [x + r * 0.7, y - r * 0.7 - h, x + r * 0.7 + w, y - r * 0.7], [r * 0.7 - 1, -r * 0.7 - h / 2]],
+      ["right", [x + r * 0.7, y + r * 0.7, x + r * 0.7 + w, y + r * 0.7 + h], [r * 0.7 - 1, r * 0.7 + h / 2]],
+      ["left", [x - r * 0.7 - w, y - r * 0.7 - h, x - r * 0.7, y - r * 0.7], [-r * 0.7 + 1, -r * 0.7 - h / 2]],
+      ["left", [x - r * 0.7 - w, y + r * 0.7, x - r * 0.7, y + r * 0.7 + h], [-r * 0.7 + 1, r * 0.7 + h / 2]],
+    ];
+    const fit = options.find(([, box]) =>
+      box[0] > 4 && box[1] > 4 && box[2] < size.x - 4 && box[3] < size.y - 4 &&
+      !placed.some((pb) => overlaps(box, pb)) &&
+      !circles.some((o) => o !== c && overlaps(box, o.box)));
+    if (!fit) continue;
+    placed.push(fit[1]);
+    L.tooltip({ permanent: true, direction: fit[0], offset: fit[2], className: "map-label", interactive: false })
+      .setLatLng([c.m.cp.lat, c.m.cp.lon]).setContent(esc(c.m.name)).addTo(state.labelLayer);
   }
 }
 
