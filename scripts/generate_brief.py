@@ -22,9 +22,14 @@ SNAPSHOT = ROOT / "data" / "portwatch.json"
 OUT = ROOT / "data" / "brief.md"
 MODEL = os.environ.get("BRIEF_MODEL", "claude-sonnet-5-5")
 
-# EIA 1H25 oil flows (mb/d) — mirrors js/config.js
-OIL = {"hormuz": 20.9, "malacca": 23.2, "suez": 4.9, "babelmandeb": 4.2, "cape": 9.1,
-       "bosporus": 3.7, "oresund": 4.9, "panama": 2.3}
+# EIA 1H25 oil flows (mb/d), matched on PortWatch chokepoint names; mirrors js/config.js
+OIL = {"hormuz": 20.9, "malacca": 23.2, "suez": 4.9, "mandeb": 4.2, "good hope": 9.1,
+       "bosp": 3.7, "resund": 4.9, "panama": 2.3}
+
+
+def oil_for(name: str):
+    low = (name or "").lower()
+    return next((v for k, v in OIL.items() if k in low), None)
 
 
 def d(s: str) -> date:
@@ -43,22 +48,24 @@ def pct(cur, base):
 
 def metrics(snapshot: dict) -> list[dict]:
     out = []
-    for key, cp in snapshot["chokepoints"].items():
+    for _pid, cp in snapshot["chokepoints"].items():
         rows = {r[0]: r for r in cp["rows"]}
         last = d(cp["rows"][-1][0])
         cur_t, cur_tk = window(rows, last, 7, 1), window(rows, last, 7, 2)
         yoy_t, yoy_tk = window(rows, last - timedelta(364), 7, 1), window(rows, last - timedelta(364), 7, 2)
-        pre = [r for r in cp["rows"] if "2023-01-01" <= r[0] <= "2023-10-31"]
-        pre_t = mean(r[1] for r in pre) if pre else None
+        if (yoy_t or 0) < 5:
+            continue  # skip low-traffic chokepoints; percentages are noise
+        norm = (cp.get("normal") or {}).get(last.isoformat()[5:])
+        pre_t = norm[0] if norm else None
         prev_t = window(rows, last - timedelta(7), 7, 1)
         out.append({
-            "chokepoint": cp.get("portname") or key, "key": key, "data_through": last.isoformat(),
+            "chokepoint": cp.get("name"), "data_through": last.isoformat(),
             "ships_per_day_7d": round(cur_t, 1) if cur_t is not None else None,
             "change_vs_last_year_pct": pct(cur_t, yoy_t),
             "tanker_change_vs_last_year_pct": pct(cur_tk, yoy_tk),
-            "change_vs_2023_pre_red_sea_pct": pct(cur_t, pre_t),
+            "change_vs_seasonal_normal_2019_2022_pct": pct(cur_t, pre_t),
             "week_on_week_pct": pct(cur_t, prev_t),
-            "normal_oil_flow_mbd_eia": OIL.get(key),
+            "normal_oil_flow_mbd_eia": oil_for(cp.get("name")),
         })
     return out
 

@@ -1,90 +1,83 @@
 // ---------------------------------------------------------------------------
-// Data layer: IMF PortWatch (ArcGIS FeatureServer) → compact daily rows.
+// Data loading.
 //
-// Strategy ("stale-while-revalidate"):
-//   1. Render immediately from data/portwatch.json, a snapshot that a GitHub
-//      Action refreshes daily (same-origin, fast, survives API outages).
-//   2. In the background, query the live PortWatch API from the browser and
-//      re-render if it returns newer data.
+// 1. data/portwatch.json: for every chokepoint, daily data for about two
+//    years, weekly averages since 2019 and the 2019–2022 seasonal normal,
+//    downloaded from IMF PortWatch every day by a GitHub Action.
+// 2. A direct request to PortWatch from your browser for the last few weeks,
+//    so the page shows the newest published days even between Action runs.
 //
-// Row format (shared with scripts/fetch_portwatch.py):
-//   [date, n_total, n_tanker, n_dry_bulk, n_container, n_general_cargo, n_roro,
-//    capacity, capacity_tanker, capacity_dry_bulk, capacity_container]
+// Row layout (same as scripts/fetch_portwatch.py):
+//   [date, ships: total, tanker, dry bulk, container, general, ro-ro,
+//          tons:  total, tanker, dry bulk, container, general, ro-ro]
 // ---------------------------------------------------------------------------
-import { API, CHOKEPOINTS } from "./config.js";
+import { PORTWATCH } from "./config.js";
+import { PROFILES } from "./profiles.js";
 
-export const COL = { date: 0, total: 1, tanker: 2, bulk: 3, container: 4, general: 5, roro: 6, cap: 7, capTanker: 8, capBulk: 9, capContainer: 10 };
+export const COL = { date: 0, total: 1, tanker: 2, bulk: 3, container: 4, general: 5, roro: 6, cap: 7 };
 
 const pad = (n) => String(n).padStart(2, "0");
+const n = (v) => (v == null || Number.isNaN(+v) ? 0 : +v);
 
 function toRow(a) {
-  const num = (v) => (v == null || Number.isNaN(+v) ? 0 : +v);
   return [
     `${a.year}-${pad(a.month)}-${pad(a.day)}`,
-    num(a.n_total), num(a.n_tanker), num(a.n_dry_bulk), num(a.n_container),
-    num(a.n_general_cargo), num(a.n_roro),
-    Math.round(num(a.capacity)), Math.round(num(a.capacity_tanker)),
-    Math.round(num(a.capacity_dry_bulk)), Math.round(num(a.capacity_container)),
+    n(a.n_total), n(a.n_tanker), n(a.n_dry_bulk), n(a.n_container), n(a.n_general_cargo), n(a.n_roro),
+    Math.round(n(a.capacity)), Math.round(n(a.capacity_tanker)), Math.round(n(a.capacity_dry_bulk)),
+    Math.round(n(a.capacity_container)), Math.round(n(a.capacity_general_cargo)), Math.round(n(a.capacity_roro)),
   ];
 }
 
-async function queryPage(where, offset) {
-  const params = new URLSearchParams({
-    where,
-    outFields: API.fields.join(","),
-    returnGeometry: "false",
-    orderByFields: "year ASC,month ASC,day ASC",
-    resultOffset: String(offset),
-    resultRecordCount: String(API.pageSize),
-    f: "json",
-  });
-  const res = await fetch(`${API.daily}?${params}`);
-  if (!res.ok) throw new Error(`PortWatch HTTP ${res.status}`);
+export function profileFor(name) {
+  const lower = (name || "").toLowerCase();
+  return PROFILES.find((p) => lower.includes(p.match)) || null;
+}
+
+export async function loadSnapshot() {
+  const res = await fetch("data/portwatch.json", { cache: "no-cache" });
+  if (!res.ok) throw new Error(`The data file could not be loaded (HTTP ${res.status}).`);
   const json = await res.json();
-  if (json.error) throw new Error(`PortWatch: ${json.error.message || "query error"}`);
+  if (!json.chokepoints || !Object.values(json.chokepoints)[0]?.normal) {
+    throw new Error("The data file is in an old format. Run the “Update PortWatch data” action once.");
+  }
   return json;
 }
 
-async function fetchChokepoint(cp) {
-  const where = `portname LIKE '%${cp.match}%' AND year >= ${API.startYear}`;
-  const rows = [];
-  let portname = null, portid = null;
-  for (let offset = 0; offset < 20000; offset += API.pageSize) {
-    const page = await queryPage(where, offset);
-    const feats = page.features || [];
-    for (const f of feats) {
-      portname ??= f.attributes.portname;
-      portid ??= f.attributes.portid;
-      rows.push(toRow(f.attributes));
+/** Fetch the last few weeks for all chokepoints straight from PortWatch and merge them in. */
+export async function topUpFromPortWatch(dataset) {
+  const from = new Date(Date.now() - PORTWATCH.topUpDays * 86400000);
+  const y = from.getUTCFullYear(), m = from.getUTCMonth() + 1;
+  const where = `(year = ${y} AND month >= ${m}) OR year > ${y}`;
+  const fields = "year,month,day,portid,portname,n_total,n_tanker,n_dry_bulk,n_container,n_general_cargo,n_roro,capacity,capacity_tanker,capacity_dry_bulk,capacity_container,capacity_general_cargo,capacity_roro";
+  let added = 0, latest = dataset.latest;
+  for (let offset = 0; offset < 10000; offset += PORTWATCH.pageSize) {
+    const params = new URLSearchParams({
+      where, outFields: fields, returnGeometry: "false",
+      orderByFields: "portid ASC,year ASC,month ASC,day ASC",
+      resultOffset: String(offset), resultRecordCount: String(PORTWATCH.pageSize), f: "json",
+    });
+    const res = await fetch(`${PORTWATCH.daily}?${params}`);
+    if (!res.ok) throw new Error(`PortWatch HTTP ${res.status}`);
+    const page = await res.json();
+    if (page.error) throw new Error(page.error.message || "PortWatch query error");
+    for (const f of page.features || []) {
+      const a = f.attributes;
+      const cp = dataset.chokepoints[a.portid];
+      if (!cp) continue;
+      const row = toRow(a);
+      const i = cp.rows.findIndex((r) => r[0] >= row[0]);
+      if (i === -1) { cp.rows.push(row); added++; }
+      else if (cp.rows[i][0] === row[0]) cp.rows[i] = row; // PortWatch revised this day
+      else { cp.rows.splice(i, 0, row); added++; }
+      if (row[0] > latest) latest = row[0];
     }
-    if (!page.exceededTransferLimit && feats.length < API.pageSize) break;
+    if (!page.exceededTransferLimit && (page.features || []).length < PORTWATCH.pageSize) break;
   }
-  // De-duplicate by date (keeps the last record if PortWatch revised a day).
-  const byDate = new Map(rows.map((r) => [r[0], r]));
-  return { portname, portid, rows: [...byDate.values()].sort((a, b) => (a[0] < b[0] ? -1 : 1)) };
+  dataset.latest = latest;
+  return added;
 }
 
-/** Live pull from PortWatch for every configured chokepoint (parallel). */
-export async function fetchLive() {
-  const results = await Promise.allSettled(CHOKEPOINTS.map(fetchChokepoint));
-  const chokepoints = {};
-  results.forEach((r, i) => {
-    const cp = CHOKEPOINTS[i];
-    if (r.status === "fulfilled" && r.value.rows.length) chokepoints[cp.key] = r.value;
-  });
-  if (!Object.keys(chokepoints).length) throw new Error("PortWatch live query returned no data");
-  return { source: "live", generated: new Date().toISOString(), chokepoints };
-}
-
-/** Snapshot committed to the repo by the GitHub Action. */
-export async function fetchSnapshot() {
-  const res = await fetch("data/portwatch.json", { cache: "no-cache" });
-  if (!res.ok) throw new Error(`snapshot HTTP ${res.status}`);
-  const json = await res.json();
-  return { ...json, source: "snapshot" };
-}
-
-export async function fetchOptional(path, type = "json") {
+export async function loadOptional(path, type = "json") {
   try {
     const res = await fetch(path, { cache: "no-cache" });
     if (!res.ok) return null;
@@ -92,13 +85,4 @@ export async function fetchOptional(path, type = "json") {
   } catch {
     return null;
   }
-}
-
-export function latestDate(dataset) {
-  let max = "";
-  for (const c of Object.values(dataset.chokepoints)) {
-    const last = c.rows.at(-1)?.[0];
-    if (last && last > max) max = last;
-  }
-  return max;
 }

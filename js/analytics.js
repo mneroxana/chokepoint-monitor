@@ -1,26 +1,19 @@
 // ---------------------------------------------------------------------------
-// Analytics: turn daily transit counts into risk signals.
-//
-//  • 7-day moving averages (PortWatch daily counts are noisy).
-//  • % change vs a chosen baseline (same week last year, or pre-Red Sea 2023).
-//  • z-score of the current 7DMA vs the prior year's distribution.
-//  • Status band (Normal / Watch / Disrupted / Severe / Surge).
-//  • Commodity risk score = structural exposure × disruption intensity.
+// Calculations. Every number here is derived from IMF PortWatch daily data
+// and the UNCTAD world trade total in config.js. Nothing is estimated by AI.
 // ---------------------------------------------------------------------------
 import { COL } from "./data.js";
-import { BASELINES, STATUS, WORLD } from "./config.js";
+import { BASELINES, STATUS, WORLD, FOCUS, VESSEL_TYPES, ENERGY } from "./config.js";
 
 const DAY = 86400000;
-export const addDays = (d, n) => new Date(Date.parse(d + "T00:00:00Z") + n * DAY).toISOString().slice(0, 10);
+export const addDays = (d, k) => new Date(Date.parse(d + "T00:00:00Z") + k * DAY).toISOString().slice(0, 10);
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const mean = (a) => (a.length ? a.reduce((s, v) => s + v, 0) / a.length : null);
-const pct = (cur, base) => (cur == null || !base ? null : ((cur - base) / base) * 100);
+export const pct = (cur, base) => (cur == null || base == null || base === 0 ? null : ((cur - base) / base) * 100);
 
-export function indexRows(rows) {
-  return new Map(rows.map((r) => [r[0], r]));
-}
+export const LOW_TRAFFIC = 5; // ships/day; below this, percentage changes are noisy
 
-/** Mean of a column over [end-days+1, end]; null if fewer than minDays observed. */
+/** Average of a column over the `days` days ending on `end`. */
 export function windowMean(idx, end, days, col, minDays = Math.ceil(days * 0.6)) {
   const vals = [];
   for (let i = 0; i < days; i++) {
@@ -34,132 +27,139 @@ function rangeMean(rows, from, to, col) {
   return mean(rows.filter((r) => r[0] >= from && r[0] <= to).map((r) => r[col]));
 }
 
-/** Rolling 7-day mean for each date in [from, to]. */
+/** 7-day average for each day between `from` and `to`. */
 export function rolling7(idx, from, to, col) {
   const out = [];
   for (let d = from; d <= to; d = addDays(d, 1)) out.push([d, windowMean(idx, d, 7, col, 4)]);
   return out;
 }
 
+/** Seasonal normal (2019–2022 average) for the 7 days ending on this calendar day. */
+export function normalOn(cp, d, col) {
+  const v = cp.normal?.[d.slice(5)];
+  return v ? v[col - 1] : null;
+}
+
 export function statusFor(chg) {
-  if (chg == null) return { id: "nodata", label: "No data", icon: "–" };
+  if (chg == null) return { id: "nodata", label: "No data", text: "not enough data" };
   return STATUS.find((s) => chg <= s.max);
 }
 
-/** Baseline value for a column given the selected baseline mode. */
-function baselineValue(rows, idx, asOf, mode, col) {
-  if (mode === "pre") return rangeMean(rows, BASELINES.pre.from, BASELINES.pre.to, col);
-  return windowMean(idx, addDays(asOf, -364), 7, col); // 364 = same weekday last year
+/** The "normal" value of a column for the chosen baseline. */
+export function baselineValue(cp, asOf, mode, col) {
+  const b = BASELINES[mode];
+  if (mode === "normal") return normalOn(cp, asOf, col);
+  if (b.from) return rangeMean(cp.rows, b.from, b.to, col);
+  return windowMean(cp.idx, addDays(asOf, -364), 7, col); // 364 days = same weekday last year
 }
 
-export function computeMetrics(conf, data, mode) {
-  if (!data || !data.rows.length) return { key: conf.key, conf, empty: true, status: statusFor(null) };
-  const { rows } = data;
-  const idx = indexRows(rows);
-  const asOf = rows.at(-1)[0];
+export function computeMetrics(cp, mode, focusKey) {
+  const focus = FOCUS[focusKey];
+  cp.idx ??= new Map(cp.rows.map((r) => [r[0], r]));
+  const asOf = cp.rows.at(-1)[0];
 
-  const cols = { total: COL.total, tanker: COL.tanker, bulk: COL.bulk, container: COL.container, cap: COL.cap, capTanker: COL.capTanker };
   const cur = {}, base = {}, chg = {};
+  const cols = { total: COL.total, cap: COL.cap };
+  for (const t of VESSEL_TYPES) { cols[t.id] = t.col; cols[t.id + "Cap"] = t.capCol; }
   for (const [k, c] of Object.entries(cols)) {
-    cur[k] = windowMean(idx, asOf, 7, c);
-    base[k] = baselineValue(rows, idx, asOf, mode, c);
+    cur[k] = windowMean(cp.idx, asOf, 7, c);
+    base[k] = baselineValue(cp, asOf, mode, c);
     chg[k] = pct(cur[k], base[k]);
   }
-  const prevWeek = windowMean(idx, addDays(asOf, -7), 7, COL.total);
-  const wow = pct(cur.total, prevWeek);
+  const focusCur = windowMean(cp.idx, asOf, 7, focus.col);
+  const focusBase = baselineValue(cp, asOf, mode, focus.col);
+  const focusChg = pct(focusCur, focusBase);
+  const wow = pct(focusCur, windowMean(cp.idx, addDays(asOf, -7), 7, focus.col));
 
-  // z-score: current 7DMA vs distribution of 7DMAs over the year before the last month.
-  const hist = rolling7(idx, addDays(asOf, -395), addDays(asOf, -31), COL.total).map((p) => p[1]).filter((v) => v != null);
-  const mu = mean(hist);
-  const sd = hist.length > 30 ? Math.sqrt(mean(hist.map((v) => (v - mu) ** 2))) : null;
-  const z = sd ? (cur.total - mu) / sd : null;
-
-  // Structural exposure (0–100): energy share of world seaborne flows + cargo weight.
-  const oilShare = conf.oilMbd ? conf.oilMbd / WORLD.maritimeOilMbd : 0;
-  const lngShare = conf.lngBcfd ? conf.lngBcfd / WORLD.lngBcfd : 0;
-  const energy = clamp((0.7 * oilShare + 0.3 * lngShare) / 0.25, 0, 1);
-
-  // Disruption intensity (0–100): drop in all traffic and in tankers specifically.
-  const drop = (v) => clamp(-(v ?? 0), 0, 100);
-  const disruption = 0.5 * drop(chg.total) + 0.5 * drop(chg.tanker);
+  // Cargo (metric tonnes per day) for the selected cargo type: now, normal, and the gap.
+  const tonsCur = windowMean(cp.idx, asOf, 7, focus.capCol);
+  const tonsBase = baselineValue(cp, asOf, mode, focus.capCol);
+  const gap = tonsCur == null || tonsBase == null ? null : tonsBase - tonsCur; // positive = cargo missing
 
   return {
-    key: conf.key, conf, asOf, cur, base, chg, wow, z,
-    status: statusFor(chg.total),
-    energy, oilShare, lngShare, disruption,
-    baseCap: base.cap,
-    rows, idx,
+    id: cp.id, cp, p: cp.profile, name: cp.displayName, asOf,
+    cur, base, chg, focusCur, focusBase, focusChg, wow,
+    tonsCur, tonsBase, gap,
+    gapShareWorld: gap == null ? null : (gap / WORLD.seaborneTonsPerDay) * 100,
+    normalTons: cp.normalAvg?.[focus.capCol - 1] ?? 0, // 2019–2022 average, for map circle size
+    lowTraffic: (focusBase ?? 0) < LOW_TRAFFIC,
+    status: statusFor(focusChg),
   };
 }
 
-/** Second pass: cargo weight needs all chokepoints to normalise. */
-export function finaliseScores(metrics) {
-  const maxCap = Math.max(...metrics.filter((m) => !m.empty).map((m) => m.baseCap || 0), 1);
-  for (const m of metrics) {
-    if (m.empty) { m.exposure = null; m.score = null; continue; }
-    const cargo = (m.baseCap || 0) / maxCap;
-    m.exposure = Math.round(100 * clamp(0.75 * m.energy + 0.25 * cargo, 0, 1));
-    // Score = exposure × (structural floor 0.35 + 0.65 × disruption)
-    m.score = Math.round(m.exposure * (0.35 + 0.65 * (m.disruption / 100)));
-  }
-  return metrics.sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+/**
+ * Ranking: by cargo missing per day (normal tonnage minus current tonnage) for
+ * the selected cargo type. Real units, the same method for every commodity.
+ */
+export function rankAll(metrics) {
+  const maxTons = Math.max(1, ...metrics.map((m) => m.normalTons));
+  for (const m of metrics) m.size = Math.sqrt(m.normalTons / maxTons); // 0–1, for the map
+  return metrics.sort((a, b) => (b.gap ?? -Infinity) - (a.gap ?? -Infinity));
 }
 
 // ---------------------------------------------------------------------------
-// Scenario: what if a chokepoint loses X% of capacity for N days?
+// Scenario calculator: loses a share of the chokepoint's normal cargo, by type.
 // ---------------------------------------------------------------------------
 export function runScenario(m, lossPct, days) {
   const f = lossPct / 100;
-  const c = m.conf;
-  const oilLost = c.oilMbd ? c.oilMbd * f : null;
-  const bypass = c.bypass?.mbd ?? 0;
-  // Bypass pipelines only help with crude/products, and only up to their capacity.
-  const oilNet = oilLost == null ? null : Math.max(0, oilLost - bypass);
-  const lngLost = c.lngBcfd ? c.lngBcfd * f : null;
-  const baseVessels = m.base?.total ?? null;
-  const baseTons = m.base?.cap ?? null;
+  const byType = VESSEL_TYPES.map((t) => {
+    const normal = m.base[t.id + "Cap"];
+    return { ...t, normalDay: normal, lostDay: normal == null ? null : normal * f, lostTotal: normal == null ? null : normal * f * days };
+  });
+  const tonsNormal = m.base.cap;
+  const tonsLostDay = tonsNormal == null ? null : tonsNormal * f;
   return {
-    oilLost, oilNet, bypassUsed: oilLost == null ? 0 : Math.min(bypass, oilLost),
-    oilShareWorld: oilNet == null ? null : (oilNet / WORLD.maritimeOilMbd) * 100,
-    cumulativeMb: oilNet == null ? null : oilNet * days,
-    lngLost, lngShareWorld: lngLost == null ? null : (lngLost / WORLD.lngBcfd) * 100,
-    vesselsPerDay: baseVessels == null ? null : baseVessels * f,
-    tonsPerDay: baseTons == null ? null : baseTons * f,
-    cumulativeMt: baseTons == null ? null : (baseTons * f * days) / 1e6,
-    observedChg: m.chg?.total ?? null,
+    f, days, byType,
+    shipsNormal: m.base.total, shipsLost: m.base.total == null ? null : m.base.total * f,
+    tonsNormal, tonsLostDay,
+    tonsLostTotal: tonsLostDay == null ? null : tonsLostDay * days,
+    shareWorld: tonsLostDay == null ? null : (tonsLostDay / WORLD.seaborneTonsPerDay) * 100,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Rule-based brief: a deterministic, data-driven summary (no LLM needed).
+// Weekly summary, written by fixed rules from the numbers (not by AI)
 // ---------------------------------------------------------------------------
-const fmtPct = (v) => (v == null ? "n/a" : `${v > 0 ? "+" : ""}${v.toFixed(0)}%`);
+const signed = (v) => { const r = Math.round(v); return `${r > 0 ? "+" : r < 0 ? "−" : ""}${Math.abs(r)}%`; };
+const ships = (v) => (v < 10 ? v.toFixed(1) : v.toFixed(0));
 
-export function ruleBasedBrief(metrics, mode) {
-  const live = metrics.filter((m) => !m.empty);
-  const M = Object.fromEntries(live.map((m) => [m.key, m]));
-  const lines = [];
-  const top = live.slice(0, 3);
-  lines.push(
-    `Highest commodity-risk chokepoints: ${top.map((m) => `${m.conf.name} (score ${m.score}, transits ${fmtPct(m.chg.total)} ${BASELINES[mode].short})`).join("; ")}.`
-  );
-  const severe = live.filter((m) => ["severe", "disrupted"].includes(m.status.id));
-  if (severe.length)
-    lines.push(`${severe.length} chokepoint${severe.length > 1 ? "s are" : " is"} disrupted or worse: ${severe.map((m) => m.conf.name).join(", ")}.`);
-  const tankerHit = live.filter((m) => m.chg.tanker != null && m.chg.tanker < -25 && m.conf.oilMbd);
-  for (const m of tankerHit.slice(0, 2)) {
-    const lost = (m.conf.oilMbd * Math.min(100, -m.chg.tanker)) / 100;
-    lines.push(
-      `${m.conf.name}: tanker transits ${fmtPct(m.chg.tanker)}. Applied to EIA's ${m.conf.oilMbd} mb/d normal flow, that implies roughly ${lost.toFixed(1)} mb/d of oil not moving by sea through this route (before bypasses) — watch ${m.conf.trader[0]}.`
-    );
+const tonsTxt = (v) => (Math.abs(v) >= 1e6 ? `${(v / 1e6).toFixed(1)} million tonnes` : `${Math.round(v / 1e3).toLocaleString("en-GB")} thousand tonnes`);
+
+export function weeklySummary(metrics, mode, focusKey) {
+  const b = BASELINES[mode];
+  const noun = FOCUS[focusKey].noun;
+  const ok = metrics.filter((m) => m.focusChg != null && m.gap != null);
+  const out = [];
+
+  const missing = ok.filter((m) => m.gap > 0 && !m.lowTraffic).slice(0, 3);
+  if (missing.length)
+    out.push({
+      title: "Most cargo missing",
+      text: `${missing.map((m) => `${m.name} (${tonsTxt(m.gap)} a day)`).join(", ")}. Compared with: ${b.label}.`,
+    });
+
+  for (const m of ok.filter((x) => ["severe", "disrupted"].includes(x.status.id) && !x.lowTraffic).slice(0, 4)) {
+    let t = `About ${ships(m.focusCur)} ${noun} a day, compared with ${ships(m.focusBase)} ${b.phrase}: ${signed(m.focusChg)}.`;
+    if (focusKey === "all") {
+      const parts = [["tankers", m.chg.tanker], ["dry bulk", m.chg.bulk], ["containers", m.chg.container]]
+        .filter(([, v]) => v != null).map(([l, v]) => `${l} ${signed(v)}`);
+      if (parts.length) t += ` By type: ${parts.join(", ")}.`;
+    }
+    if (m.gap > 0) t += ` Roughly ${tonsTxt(m.gap)} of cargo a day is not passing.`;
+    const en = focusKey === "tanker" && m.p?.match ? ENERGY.flows[m.p.match] : null;
+    if (en) t += ` Normally about ${en.oilMbd} million barrels of oil a day pass here (U.S. EIA).`;
+    out.push({ title: m.name, text: t });
   }
-  if (M.cape && M.babelmandeb && M.cape.chg.total > 10 && M.babelmandeb.chg.total < -10)
-    lines.push(`Rerouting signal: Cape of Good Hope ${fmtPct(M.cape.chg.total)} while Bab el-Mandeb is ${fmtPct(M.babelmandeb.chg.total)} — ships are still avoiding the Red Sea, supporting ton-mile demand and freight rates.`);
-  const movers = [...live].filter((m) => m.wow != null).sort((a, b) => Math.abs(b.wow) - Math.abs(a.wow)).slice(0, 2);
+
+  const surge = ok.filter((m) => m.status.id === "surge" && !m.lowTraffic);
+  if (surge.length)
+    out.push({
+      title: "Traffic above normal",
+      text: `${surge.map((m) => `${m.name} ${signed(m.focusChg)}`).join(", ")}. A rise often means ships are taking this route to avoid another one.`,
+    });
+
+  const movers = ok.filter((m) => m.wow != null && !m.lowTraffic && Math.abs(m.wow) >= 10).sort((a, b) => Math.abs(b.wow) - Math.abs(a.wow)).slice(0, 3);
   if (movers.length)
-    lines.push(`Biggest week-on-week moves: ${movers.map((m) => `${m.conf.name} ${fmtPct(m.wow)}`).join(", ")}.`);
-  const zs = live.filter((m) => m.z != null && Math.abs(m.z) >= 2);
-  if (zs.length)
-    lines.push(`Statistically unusual (|z| ≥ 2 vs prior-year range): ${zs.map((m) => `${m.conf.name} (z = ${m.z.toFixed(1)})`).join(", ")}.`);
-  return lines;
+    out.push({ title: "Biggest changes since the previous week", text: movers.map((m) => `${m.name} ${signed(m.wow)}`).join(", ") + "." });
+  return out;
 }

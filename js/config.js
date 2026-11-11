@@ -1,264 +1,89 @@
 // ---------------------------------------------------------------------------
-// Chokepoint Risk Monitor — static configuration
+// Chokepoint Risk Monitor: configuration and the analyst layer.
 //
-// Two layers of knowledge live here:
-//   1. How to find each chokepoint in IMF PortWatch (name match for the API).
-//   2. The "so what" layer PortWatch doesn't give you: which commodities move
-//      through each chokepoint, how big those flows are, what bypasses exist,
-//      and what a commodity trader / geopolitical risk analyst would watch.
-//
-// Energy flow figures: U.S. EIA, "World Oil Transit Chokepoints" (updated
-// 3 Mar 2026), 1H 2025 values. LNG share of global trade for Hormuz: IEA
-// Strait of Hormuz factsheet (≈19-20%). Edit freely — this file is meant to
-// be the analyst's opinion layer on top of the data.
+// The written chokepoint profiles, their sources and the chart events live in
+// js/profiles.js, which is designed to be edited directly on GitHub.
 // ---------------------------------------------------------------------------
 
-export const API = {
+export const PORTWATCH = {
   daily:
     "https://services9.arcgis.com/weJ1QsnbMYJlCHdG/arcgis/rest/services/Daily_Chokepoints_Data/FeatureServer/0/query",
-  pageSize: 1000, // PortWatch returns max 1000 records per request
-  startYear: 2023, // need Jan–Oct 2023 for the pre-Red Sea baseline
-  fields: [
-    "year", "month", "day", "portid", "portname",
-    "n_total", "n_tanker", "n_dry_bulk", "n_container", "n_general_cargo", "n_roro",
-    "capacity", "capacity_tanker", "capacity_dry_bulk", "capacity_container",
-  ],
+  pageSize: 1000,
+  topUpDays: 60, // the browser refreshes the most recent weeks directly from PortWatch
 };
 
-// Reference denominators (EIA 1H25; global LNG derived from IEA: Hormuz
-// ≈11.4 bcf/d ≈ 20% of global LNG trade → ≈57 bcf/d).
+// World seaborne trade: 12,720 million tonnes in 2024 (UNCTAD, Review of
+// Maritime Transport 2025), used to express missing cargo as a share of it.
 export const WORLD = {
-  maritimeOilMbd: 79.8,
-  lngBcfd: 57,
+  seaborneTonsPerDay: 12720e6 / 366,
+  source: { label: "UNCTAD, Review of Maritime Transport 2025", url: "https://unctad.org/system/files/official-document/rmt2025ch1_en.pdf" },
 };
 
-// Baseline windows the user can choose between.
+// What "normal" means. Each baseline answers a different question.
 export const BASELINES = {
-  yoy: { label: "Same week last year", short: "vs last year" },
-  pre: { label: "Pre-Red Sea crisis (Jan–Oct 2023)", short: "vs 2023", from: "2023-01-01", to: "2023-10-31" },
+  normal: {
+    label: "Seasonal normal (2019–2022)",
+    short: "vs normal",
+    phrase: "in a normal year",
+    explain: "Compares with the same week averaged over 2019–2022, the four years before the Red Sea crisis. This is the steadiest benchmark: it removes seasonal swings and is not distorted by any single unusual year.",
+  },
+  yoy: {
+    label: "Same week last year",
+    short: "vs last year",
+    phrase: "a year earlier",
+    explain: "Compares with the same seven days a year earlier. Useful for recent momentum, but misleading where last year was itself disrupted, as in the Red Sea.",
+  },
+  preWar: {
+    label: "Before the Iran war (Jan–Feb 2026)",
+    short: "vs before the war",
+    phrase: "before the Iran war",
+    from: "2026-01-01", to: "2026-02-27",
+    explain: "Compares with 1 January to 27 February 2026, the weeks before the US and Israeli strikes on Iran on 28 February. Isolates the effect of this year's conflict.",
+  },
 };
 
-// Status thresholds on % change of 7-day average vessel transits vs baseline.
-export const STATUS = [
-  { id: "severe", label: "Severe", icon: "⛔", max: -50 },
-  { id: "disrupted", label: "Disrupted", icon: "▲", max: -25 },
-  { id: "watch", label: "Watch", icon: "●", max: -10 },
-  { id: "normal", label: "Normal", icon: "✓", max: 25 },
-  { id: "surge", label: "Surge / rerouting", icon: "↗", max: Infinity },
+// Vessel types in PortWatch and what they typically carry.
+export const VESSEL_TYPES = [
+  { id: "tanker", label: "Tankers", carries: "Crude oil, refined fuels, chemicals, LNG and LPG", col: 2, capCol: 8 },
+  { id: "bulk", label: "Dry bulk", carries: "Grains, iron ore, coal, fertiliser, bauxite", col: 3, capCol: 9 },
+  { id: "container", label: "Container ships", carries: "Manufactured and consumer goods", col: 4, capCol: 10 },
+  { id: "general", label: "General cargo", carries: "Steel, machinery, project cargo", col: 5, capCol: 11 },
+  { id: "roro", label: "Ro-ro", carries: "Cars, trucks and other vehicles", col: 6, capCol: 12 },
 ];
 
-export const CHOKEPOINTS = [
-  {
-    key: "hormuz",
-    match: "Hormuz",
-    name: "Strait of Hormuz",
-    region: "Middle East",
-    lat: 26.57, lon: 56.25,
-    oilMbd: 20.9, lngBcfd: 11.4,
-    bypass: { mbd: 4.7, note: "Saudi East-West + UAE Habshan–Fujairah (ADCOP) pipelines ≈4.7 mb/d usable bypass (EIA)" },
-    detour: "No sea alternative — Gulf exporters are landlocked behind the strait.",
-    commodities: ["Crude oil", "Refined products", "LNG (Qatar, UAE)", "LPG", "Urea & ammonia", "Methanol / polymers", "Aluminium"],
-    trader: [
-      "Brent–Dubai spread and Dubai backwardation",
-      "VLCC rates MEG→China (TD3C) and war-risk premiums",
-      "JKM LNG vs TTF — Asia bids for Atlantic cargoes",
-      "Asian refining margins; Indian/Pakistani LNG shortfalls",
-      "Gulf urea/ammonia FOB → global fertilizer prices",
-    ],
-    risk: [
-      "State naval action, blockades and mining",
-      "Vessel seizures / GNSS jamming / AIS 'dark' transits",
-      "Sanctions enforcement on Iranian barrels",
-      "Hull & war-risk insurance withdrawal",
-    ],
-  },
-  {
-    key: "babelmandeb",
-    match: "Mandeb",
-    name: "Bab el-Mandeb",
-    region: "Red Sea",
-    lat: 12.6, lon: 43.4,
-    oilMbd: 4.2, lngBcfd: 0.0,
-    bypass: null,
-    detour: "Reroute via Cape of Good Hope (~10+ extra days Asia–Europe).",
-    commodities: ["Crude & products (East↔West)", "Containers (Asia–Europe)", "Grains to East Africa / Asia", "Saudi Red Sea exports"],
-    trader: [
-      "Diesel/jet East→West arbitrage and NW Europe cracks",
-      "Asia–N. Europe container rates (SCFI / Drewry WCI)",
-      "Suezmax/Aframax ton-mile demand",
-      "Bunker demand at Cape/Singapore hubs",
-    ],
-    risk: [
-      "Houthi missile/drone attacks and seizures",
-      "Yemen conflict spill-over; Red Sea coast control",
-      "Naval escort coverage (EU Aspides etc.)",
-      "Crew safety & owner flag-based targeting",
-    ],
-  },
-  {
-    key: "suez",
-    match: "Suez",
-    name: "Suez Canal",
-    region: "Red Sea / Med",
-    lat: 30.59, lon: 32.44,
-    oilMbd: 4.9, lngBcfd: 0.9,
-    bypass: { mbd: 2.5, note: "SUMED pipeline (Ain Sukhna → Sidi Kerir), capacity ≈2.5 mb/d (EIA). Oil figure includes SUMED." },
-    detour: "Cape of Good Hope (~10+ extra days Asia–Europe).",
-    commodities: ["Containers", "Crude & products", "LNG", "Grains (Black Sea → Asia/MENA)", "Steel & bulk"],
-    trader: [
-      "Container freight Asia–Med/N. Europe",
-      "Black Sea/Med wheat delivered to Asia",
-      "Egypt FX & canal revenue (sovereign risk)",
-    ],
-    risk: [
-      "Red Sea security (driven by Bab el-Mandeb)",
-      "Groundings/blockages (Ever Given, 2021)",
-      "Egyptian political & fiscal stability",
-    ],
-  },
-  {
-    key: "cape",
-    match: "Good Hope",
-    name: "Cape of Good Hope",
-    region: "Southern Africa",
-    lat: -34.6, lon: 19.5,
-    oilMbd: 9.1, lngBcfd: 5.7,
-    bypass: null,
-    detour: "This is the detour — rising transits signal diversion from Red Sea/Suez.",
-    commodities: ["Rerouted containers & tankers", "Brazil iron ore → China", "West Africa crude → Asia", "LNG (Atlantic → Asia)"],
-    trader: [
-      "Ton-mile demand → tanker & capesize earnings",
-      "Bunker sales (Port Louis, Algoa Bay, Las Palmas)",
-      "Longer voyages tie up fleet capacity → freight upside",
-    ],
-    risk: [
-      "Weather (Southern Ocean winter storms)",
-      "Limited bunkering/port infrastructure in South Africa",
-    ],
-  },
-  {
-    key: "malacca",
-    match: "Malacca",
-    name: "Strait of Malacca",
-    region: "Southeast Asia",
-    lat: 2.6, lon: 101.2,
-    oilMbd: 23.2, lngBcfd: 9.2,
-    bypass: null,
-    detour: "Lombok/Makassar or Sunda straits (+2–3 days for large tankers).",
-    commodities: ["Crude to China / Japan / Korea", "LNG", "Coal", "Containers", "Palm oil"],
-    trader: [
-      "Chinese crude import pace & teapot refinery runs",
-      "Singapore bunker & product cracks",
-      "Thermal coal (Indonesia/Australia → North Asia)",
-    ],
-    risk: [
-      "Piracy & armed robbery (Singapore Strait)",
-      "South China Sea tensions spill-over",
-      "Collisions in congested traffic separation scheme",
-    ],
-  },
-  {
-    key: "panama",
-    match: "Panama",
-    name: "Panama Canal",
-    region: "Americas",
-    lat: 9.1, lon: -79.7,
-    oilMbd: 2.3, lngBcfd: null,
-    bypass: null,
-    detour: "Cape Horn / Suez, or US West Coast rail land-bridge.",
-    commodities: ["US Gulf grains & soybeans → Asia", "US LPG & LNG → Asia", "Containers (Asia–US East Coast)", "Refined products"],
-    trader: [
-      "US Gulf vs PNW grain basis",
-      "VLGC freight US Gulf → Japan (LPG)",
-      "Panama draft/slot restrictions & auction prices",
-    ],
-    risk: [
-      "Drought / Gatun Lake water levels (El Niño)",
-      "US–Panama political pressure over canal control",
-    ],
-  },
-  {
-    key: "bosporus",
-    match: "Bosp",
-    name: "Bosporus (Turkish Straits)",
-    region: "Black Sea",
-    lat: 41.12, lon: 29.07,
-    oilMbd: 3.7, lngBcfd: null,
-    bypass: null,
-    detour: "None for Black Sea ports — pipelines (CPC, BTC) are partial substitutes.",
-    commodities: ["Russian & Kazakh (CPC) crude", "Russian products", "Ukrainian & Russian wheat/corn", "Sunflower oil", "Steel & fertilizer"],
-    trader: [
-      "Black Sea wheat FOB vs EU/US origins",
-      "CPC Blend & Urals differentials",
-      "Russia–Ukraine war-risk cover for Black Sea calls",
-    ],
-    risk: [
-      "Russia–Ukraine war (port strikes, sea drones, mines)",
-      "Montreux Convention / Turkish transit policy",
-      "Sanctions & price-cap enforcement on Russian oil",
-    ],
-  },
-  {
-    key: "oresund",
-    match: "resund",
-    name: "Øresund (Danish Straits)",
-    region: "Baltic",
-    lat: 55.9, lon: 12.7,
-    oilMbd: 4.9, lngBcfd: null,
-    bypass: null,
-    detour: "Great Belt (deeper-draft alternative within Danish Straits).",
-    commodities: ["Russian Baltic crude (Primorsk, Ust-Luga)", "Russian products", "Baltic grains", "Containers"],
-    trader: [
-      "Urals discount & Baltic Aframax rates",
-      "Shadow-fleet tanker availability",
-    ],
-    risk: [
-      "Shadow-fleet inspections / insurance checks by Denmark",
-      "Subsea cable/pipeline sabotage incidents",
-      "Note: EIA oil figure covers all Danish Straits (incl. Great Belt)",
-    ],
-  },
-  {
-    key: "gibraltar",
-    match: "Gibraltar",
-    name: "Strait of Gibraltar",
-    region: "Mediterranean",
-    lat: 35.95, lon: -5.6,
-    oilMbd: null, lngBcfd: null,
-    bypass: null,
-    detour: "None for Med ↔ Atlantic.",
-    commodities: ["Containers (Algeciras, Tanger Med)", "Crude & products", "Bulk"],
-    trader: ["Med product balances", "Transhipment congestion at Tanger Med / Algeciras"],
-    risk: ["Migration-related maritime incidents", "Spain–Morocco–UK political frictions"],
-  },
-  {
-    key: "dover",
-    match: "Dover",
-    name: "Dover Strait",
-    region: "NW Europe",
-    lat: 51.0, lon: 1.45,
-    oilMbd: null, lngBcfd: null,
-    bypass: null,
-    detour: "North of Scotland (major detour).",
-    commodities: ["Containers (Rotterdam, Antwerp, Hamburg)", "Products (ARA hub)", "Baltic & Russian flows"],
-    trader: ["ARA product stocks & gasoil flows", "North Sea feeder congestion"],
-    risk: ["Collisions in world's busiest TSS", "Strikes at Channel/ARA ports"],
-  },
-  {
-    key: "taiwan",
-    match: "Taiwan",
-    name: "Taiwan Strait",
-    region: "East Asia",
-    lat: 24.4, lon: 119.6,
-    oilMbd: null, lngBcfd: null,
-    bypass: null,
-    detour: "East of Taiwan via Luzon Strait / Philippine Sea.",
-    commodities: ["Containers (electronics, semis)", "LNG & coal to Taiwan/Japan", "Crude to North Asia"],
-    trader: ["Transpacific container rates", "Japan/Korea LNG & coal imports"],
-    risk: [
-      "PLA exercises & declared live-fire zones",
-      "Blockade / quarantine scenarios",
-      "Grey-zone coast guard activity",
-    ],
-  },
+// The commodity filter at the top of the page.
+export const FOCUS = {
+  all: { label: "All ships", noun: "ships", col: 1, capCol: 7 },
+  tanker: { label: "Energy (tankers)", noun: "tankers", col: 2, capCol: 8 },
+  bulk: { label: "Dry bulk (grains, ores, coal)", noun: "dry bulk carriers", col: 3, capCol: 9 },
+  container: { label: "Containers (manufactured goods)", noun: "container ships", col: 4, capCol: 10 },
+};
+
+// Status bands on the change in ships per day versus the chosen baseline.
+export const STATUS = [
+  { id: "severe", label: "Severe", max: -50, text: "more than 50% below normal" },
+  { id: "disrupted", label: "Disrupted", max: -25, text: "25–50% below normal" },
+  { id: "watch", label: "Watch", max: -10, text: "10–25% below normal" },
+  { id: "normal", label: "Normal", max: 25, text: "within −10% and +25% of normal" },
+  { id: "surge", label: "Surge", max: Infinity, text: "more than 25% above normal, often rerouted traffic" },
 ];
+
+// ---------------------------------------------------------------------------
+// Energy layer: shown ONLY when the Cargo menu is set to "Energy (tankers)".
+// U.S. EIA, "World Oil Transit Chokepoints" (updated March 2026), first half
+// of 2025 unless noted. Keyed by the `match` name used in js/profiles.js.
+// ---------------------------------------------------------------------------
+export const ENERGY = {
+  source: { label: "U.S. EIA, World Oil Transit Chokepoints (March 2026)", url: "https://www.eia.gov/international/content/analysis/special_topics/World_Oil_Transit_Chokepoints" },
+  worldSeaborneOilMbd: 79.8, // world maritime oil trade, 1H 2025
+  flows: {
+    malacca: { oilMbd: 23.2, lngBcfd: 9.2 },
+    hormuz: { oilMbd: 20.9, lngBcfd: 11.4, bypassMbd: 4.7, bypassNote: "Saudi East-West and UAE Habshan–Fujairah pipelines" },
+    "good hope": { oilMbd: 9.1, lngBcfd: 5.7 },
+    suez: { oilMbd: 4.9, lngBcfd: 0.9, bypassMbd: 2.5, bypassNote: "SUMED pipeline; the oil figure includes SUMED", },
+    resund: { oilMbd: 4.9, note: "Figure covers all the Danish Straits." },
+    mandeb: { oilMbd: 4.2, lngBcfd: 0 },
+    bosp: { oilMbd: 3.7, note: "Figure covers the Turkish Straits." },
+    panama: { oilMbd: 2.3, note: "Fiscal year 2025 (October 2024 to September 2025)." },
+  },
+};
